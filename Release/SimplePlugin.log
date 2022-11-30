@@ -1,0 +1,2 @@
+﻿..\plugin_sdk\plugin_sdk.cpp(1538,20): warning : 100 enumeration values not handled in switch: 'Annie', 'Olaf', 'TwistedFate'... [-Wswitch]
+  SimplePlugin.vcxproj -> E:\coding\NovaEve\Release\SimplePlugin.dll
