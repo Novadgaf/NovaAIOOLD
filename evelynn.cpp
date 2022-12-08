@@ -8,7 +8,9 @@ namespace evelynn
     #define Q_DRAW_COLOR (MAKE_COLOR ( 102,255,255, 255 )) 
     #define W_DRAW_COLOR (MAKE_COLOR ( 102,255,255, 255 ))  
     #define E_DRAW_COLOR (MAKE_COLOR ( 102,255,255, 255 ))  
-    #define R_DRAW_COLOR (MAKE_COLOR ( 102,255,255, 255 ))   
+    #define R_DRAW_COLOR (MAKE_COLOR ( 102,255,255, 255 ))  
+    #define GREEN (MAKE_COLOR ( 0,255,0, 255 )) 
+    #define RED (MAKE_COLOR ( 255,0,0, 255 )) 
 
     script_spell* q = nullptr;
     script_spell* w = nullptr;
@@ -17,9 +19,13 @@ namespace evelynn
 
     script_spell* flash = nullptr;
     script_spell* smite = nullptr;
-    //script_spell* rocketbelt = nullptr;
 
     TreeTab* main_tab = nullptr;
+
+    const char* valid_w_monsters[1] = { "SRU_Gromp" };
+    uint32_t eve_q_hash = 2887908017;
+    float w_cast_tp = 0;
+    bool timer_enabled = false;
 
     namespace draw_settings
     {
@@ -38,6 +44,7 @@ namespace evelynn
 
         TreeEntry* w_seperator = nullptr;
         TreeEntry* use_w = nullptr;
+        TreeEntry* w_mode_swap = nullptr;
         TreeEntry* wait_for_charm = nullptr;
 
         TreeEntry* e_seperator = nullptr;
@@ -96,15 +103,24 @@ namespace evelynn
     void on_buff_gain(game_object_script sender, buff_instance_script buff);
     void on_buff_lose(game_object_script sender, buff_instance_script buff);
 
-    // Declaring functions responsible for spell-logic
-    //
-    void q_logic();
-    void rocketbelt_logic();
-    void w_logic();
-    void e_logic();
-    void r_logic();
+    // combo
+    bool q_logic();
+    bool w_logic();
+    bool e_logic();
+    bool r_logic();
+    bool rocketbelt_logic();
 
-    // Enum is used to define myhero region 
+    // charge w logic
+    bool w_timer_logic();
+    bool check_w_charged();
+    void startTimer();
+    void resetTimer();
+    float getTimerStatus();
+
+    // farm logic
+    bool isValidWMonster(game_object_script monster);
+    bool validW(game_object_script monster);
+
     enum Position
     {
         Line,
@@ -118,7 +134,7 @@ namespace evelynn
         // Registering a spells
         //
         q = plugin_sdk->register_spell(spellslot::q, 800);
-        q->set_skillshot(0.3f, 60.0f, 2400.0f, { collisionable_objects::minions, collisionable_objects::yasuo_wall, collisionable_objects::heroes }, skillshot_type::skillshot_line);
+        q->set_skillshot(0.25f, 60.0f, 2400.0f, { collisionable_objects::minions, collisionable_objects::yasuo_wall, collisionable_objects::heroes }, skillshot_type::skillshot_line);
         q->set_spell_lock(false);
 
         w = plugin_sdk->register_spell(spellslot::w, 1200);
@@ -136,10 +152,6 @@ namespace evelynn
         else if (myhero->get_spell(spellslot::summoner2)->get_spell_data()->get_name_hash() == spell_hash("SummonerSmite"))
             smite = plugin_sdk->register_spell(spellslot::summoner2, 500);
 
-
-        
-
-
         // Create a menu according to the description in the "Menu Section"
         //
         main_tab = menu->create_tab("evelynn", "Evelynn");
@@ -152,9 +164,10 @@ namespace evelynn
                 combo::use_q->set_texture(myhero->get_spell(spellslot::q)->get_icon_texture());
                 combo::q_range = combo->add_slider(myhero->get_model() + ".comboQRange", "Q range for combo", 750, 500, 800);
                 combo::w_seperator = combo->add_separator("settingsW", "-- W Settings --");
-                combo::use_w = combo->add_checkbox(myhero->get_model() + ".comboUseW", "Use W in Team Fight", true);
+                combo::use_w = combo->add_checkbox(myhero->get_model() + ".comboUseW", "Use W", true);
                 combo::use_w->set_texture(myhero->get_spell(spellslot::w)->get_icon_texture());
-                combo::wait_for_charm = combo->add_checkbox(myhero->get_model() + ".combowaitForCharm", "Wait for Charm", true);
+                //combo::wait_for_charm = combo->add_checkbox(myhero->get_model() + ".comboWaitForCharm", "Wait for Charm", true);
+                combo::wait_for_charm = combo->add_hotkey(myhero->get_model() + ".comboWaitForCharm", "Wait for Charm", TreeHotkeyMode::Toggle, 'K', true);
                 combo::e_seperator = combo->add_separator("settingsE", "-- E Settings --");
                 combo::use_e = combo->add_checkbox(myhero->get_model() + ".comboUseE", "Use E", true);
                 combo::use_e->set_texture(myhero->get_spell(spellslot::e)->get_icon_texture());
@@ -261,382 +274,449 @@ namespace evelynn
         event_handler<events::on_buff_lose>::remove_handler(on_buff_lose);
     }
 
-    // Main update script function
+    
     void on_update()
     {
         if (myhero->is_dead())
         {
             return;
         }
-        //rocketbelt = plugin_sdk->register_spell(myhero->has_item(3152), 1200);
-        
-        // Very important if can_move ( extra_windup ) 
-        // Extra windup is the additional time you have to wait after the aa
-        // Too small time can interrupt the attack
-        if (orbwalker->can_move(0.05f))
+
+        // killsteal with r
+        if (r->is_ready() && killsteal::use_r->get_bool())
         {
-            //Checking if the user has combo_mode() (Default SPACE)
-            if (orbwalker->combo_mode())
+            if (r_logic())
+                return;
+        }
+       
+        if (orbwalker->combo_mode())
+        {
+            // r should always kill if in combo mode so we declare it here in order to not write it 2 times
+            if (r->is_ready() && combo::use_r->get_bool())
             {
-                if (r->is_ready() && combo::use_r->get_bool())
+                if (r_logic())
+                    return;
+            }
+
+            if (combo::wait_for_charm->get_bool() && combo::use_w->get_bool())
+            {
+                if (w->is_ready())
                 {
-                    r_logic();
+                    if (w_timer_logic())
+                        return;
                 }
-                
+
+                if (!(myhero->get_spell_state(w->get_slot()) & spell_state::NotLearned))
+                    if (!check_w_charged())
+                        return;
+                        
+                if (e->is_ready() && combo::use_e->get_bool())
+                {
+                    if (e_logic())
+                        return;
+                }
+
                 if (q->is_ready() && combo::use_q->get_bool())
                 {
-                    q_logic();
+                    if (q_logic())
+                        return;
+                }
+
+            } 
+            else
+            {
+                if (q->is_ready() && combo::use_q->get_bool())
+                {
+                    if (q_logic())
+                        return;
                 }
 
                 if (combo::use_rocketbelt->get_bool())
                 {
-                    rocketbelt_logic();
+                    if (rocketbelt_logic())
+                        return;
                 }
 
                 if (w->is_ready() && combo::use_w->get_bool())
                 {
-                    w_logic();
+                    if (w_logic())
+                        return;
                 }
 
                 if (e->is_ready() && combo::use_e->get_bool())
                 {
-                    e_logic();
+                    if (e_logic())
+                        return;
                 }
             }
+                
+        }
 
-            //Checking if the user has selected harass() (Default C)
-            if (orbwalker->harass())
+        if (orbwalker->harass())
+        {
+            if (q->is_ready() && harass::use_q->get_bool())
             {
-                if (q->is_ready() && harass::use_q->get_bool())
-                {
-                    // Get a target from a given range
-                    auto target = target_selector->get_target(q->range(), damage_type::physical);
-
-                    // Always check an object is not a nullptr!
-                    if (target != nullptr)
-                    {
-                        if (!myhero->has_buff(buff_hash("GarenE")))
-                        {
-                            if (!myhero->is_under_enemy_turret())
-                            {
-                                if (q->cast())
-                                {
-                                    return;
-                                }
-                            }
-                        }
-
-                        // Disabling e if q inflicts more damage than the enemy's health
-                        else if (myhero->has_buff(buff_hash("GarenE")) && q->get_damage(target) > target->get_health())
-                        {
-                            if (e->cast())
-                            {
-                                if (q->cast())
-                                {
-                                    return;
-                                }
-                            }
-                        }
-
-                    }
-                }
-                if (!q->is_ready() && e->is_ready() && harass::use_e->get_bool())
-                {
-                    // Get a target from a given range
-                    auto target = target_selector->get_target(e->range(), damage_type::physical);
-
-                    // Always check an object is not a nullptr!
-                    if (target != nullptr)
-                    {
-                        if (!myhero->has_buff(buff_hash("GarenE")))
-                        {
-                            if (e->cast())
-                            {
-                                return;
-                            }
-                        }
-                    }
-                }
-
+                if (q_logic())
+                    return;
             }
 
-            // Checking if the user has selected flee_mode() (Default Z)
-            if (orbwalker->flee_mode())
+            if (w->is_ready() && combo::use_w->get_bool())
             {
-                if (q->is_ready() && fleemode::use_r->get_bool())
+                if (w_logic())
+                    return;
+            }
+
+            if (e->is_ready() && harass::use_e->get_bool())
+            {
+                if (e_logic())
+                    return;
+            }
+        }
+
+        // Checking if the user has selected flee_mode() (Default Z)
+        if (orbwalker->flee_mode())
+        {
+            if (r->is_ready() && fleemode::use_r->get_bool())
+            {
+                    
+                if (r->cast())
                 {
-                    if (q->cast())
+                    return;
+                }
+            }
+        }
+
+        // Checking if the user has selected lane_clear_mode() (Default V)
+        if (orbwalker->lane_clear_mode())
+        {
+
+            // Gets enemy minions from the entitylist
+            auto lane_minions = entitylist->get_enemy_minions();
+
+            // Gets jugnle mobs from the entitylist
+            auto monsters = entitylist->get_jugnle_mobs_minions();
+
+            // You can use this function to delete minions that aren't in the specified range
+            lane_minions.erase(std::remove_if(lane_minions.begin(), lane_minions.end(), [](game_object_script x)
+                {
+                    return !x->is_valid_target(q->range());
+                }), lane_minions.end());
+
+            // You can use this function to delete monsters that aren't in the specified range
+            monsters.erase(std::remove_if(monsters.begin(), monsters.end(), [](game_object_script x)
+                {
+                    return !x->is_valid_target(q->range());
+                }), monsters.end());
+
+            //std::sort -> sort monsters by max helth
+            std::sort(monsters.begin(), monsters.end(), [](game_object_script a, game_object_script b)
+                {
+                    return a->get_max_health() > b->get_max_health();
+                });
+
+            // Set the correct region where myhero is
+            if (!lane_minions.empty())
+            {
+                my_hero_region = Position::Line;
+            }
+            else if (!monsters.empty())
+            {
+                my_hero_region = Position::Jungle;
+            }
+
+            if (!lane_minions.empty())
+            {
+                // Logic responsible for lane minions
+                //
+                if (q->is_ready() && laneclear::use_q->get_bool())
+                {
+                    if (q->cast(lane_minions[0]))
+                        return;
+                }
+                if (e->is_ready() && laneclear::use_e->get_bool())
+                {
+                    if (e->cast(lane_minions[0]))
                     {
                         return;
                     }
                 }
             }
 
-            // Checking if the user has selected lane_clear_mode() (Default V)
-            if (orbwalker->lane_clear_mode())
+            if (!monsters.empty())
             {
-
-                // Gets enemy minions from the entitylist
-                auto lane_minions = entitylist->get_enemy_minions();
-
-                // Gets jugnle mobs from the entitylist
-                auto monsters = entitylist->get_jugnle_mobs_minions();
-
-                // You can use this function to delete minions that aren't in the specified range
-                lane_minions.erase(std::remove_if(lane_minions.begin(), lane_minions.end(), [](game_object_script x)
-                    {
-                        return !x->is_valid_target(e->range() + 300);
-                    }), lane_minions.end());
-
-                // You can use this function to delete monsters that aren't in the specified range
-                monsters.erase(std::remove_if(monsters.begin(), monsters.end(), [](game_object_script x)
-                    {
-                        return !x->is_valid_target(e->range() + 300);
-                    }), monsters.end());
-
-                //std::sort -> sort monsters by max helth
-                std::sort(monsters.begin(), monsters.end(), [](game_object_script a, game_object_script b)
-                    {
-                        return a->get_max_health() > b->get_max_health();
-                    });
-
-                // Set the correct region where myhero is
-                if (!lane_minions.empty())
+                // Logic responsible for monsters
+                if (validW(monsters[0]))
                 {
-                    my_hero_region = Position::Line;
-                }
-                else if (!monsters.empty())
-                {
-                    my_hero_region = Position::Jungle;
-                }
-
-                if (!lane_minions.empty())
-                {
-                    // Logic responsible for lane minions
-                    //
-                    if (q->is_ready() && laneclear::use_q->get_bool())
+                    startTimer();
+                    if (w->cast(monsters[0]))
                     {
-                        if (myhero->is_under_enemy_turret())
-                        {
-                            if (myhero->count_enemies_in_range(q->range()) == 0)
-                            {
-                                if (q->cast())
-                                {
-                                    return;
-                                }
-                            }
-                        }
-                        if (!myhero->has_buff(buff_hash("GarenE")))
-                        {
-                            if (q->cast())
-                                return;
-                        }
-                    }
-                    if (q->cooldown_time() > 0 && e->is_ready() && laneclear::use_e->get_bool() && !myhero->has_buff(buff_hash("GarenE")))
-                    {
-                        if (myhero->is_under_enemy_turret())
-                        {
-                            if (myhero->count_enemies_in_range(e->range()) == 0)
-                            {
-                                if (e->cast())
-                                {
-                                    return;
-                                }
-                            }
-                        }
-                        else if (!myhero->has_buff(buff_hash("GarenE")))
-                        {
-                            if (e->cast())
-                            {
-                                return;
-                            }
-                        }
+                        return;
                     }
                 }
 
-                if (!monsters.empty())
+                // wait for w charge
+                if (!w->is_ready() && getTimerStatus() <= 2.5f && timer_enabled)
                 {
-                    // Logic responsible for monsters
-                    if (q->is_ready() && jungleclear::use_q->get_bool())
-                    {
-                        if (!myhero->has_buff(buff_hash("GarenE")))
-                        {
-                            if (q->cast())
-                                return;
-                        }
-                    }
-                    if (q->cooldown_time() > 0 && e->is_ready() && jungleclear::use_e->get_bool() && !myhero->has_buff(buff_hash("GarenQ")))
-                    {
-                        if (!myhero->has_buff(buff_hash("GarenE")))
-                        {
-                            if (e->cast())
-                                return;
-                        }
-                    }
+                    return;
+                }
+                else if (getTimerStatus() >= 2.5f)
+                    resetTimer();
+                        
+
+                if (q->is_ready() && jungleclear::use_q->get_bool())
+                {
+                    if (q->cast(monsters[0]))
+                        return;
+                }
+                if (e->is_ready() && jungleclear::use_e->get_bool())
+                {
+                    if (e->cast(monsters[0]))
+                        return;
                 }
             }
         }
     }
 
-#pragma region q_logic
-    void q_logic()
+    #pragma region q_logic
+    bool q_logic()
     {
-        // Get a target from a given range
         auto target = target_selector->get_target(combo::q_range->get_int(), damage_type::magical);
 
-        // Always check an object is not a nullptr!
         if (target == nullptr)
-            return;
-        // Check if the distance between myhero and enemy is smaller than q range
+            return false;
         
         if (target->get_distance(myhero) <= q->range())
         {
             q->cast(target);
-            //rocketbelt->fast_cast(target->get_position());
+            return true;
         }
-            
+        return false;
     }
-#pragma endregion
+    #pragma endregion
 
-#pragma region w_logic
-    void w_logic()
+
+    #pragma region w_logic
+    bool w_logic()
     {
-        // Get a target from a given range
         auto target = target_selector->get_target(w->range(), damage_type::magical);
 
-        // Always check an object is not a nullptr!
         if (target == nullptr)
-            return;
+            return false;
 
         if (target->get_distance(myhero) <= w->range())
         {
-            if (w->cast(target))
-                return;
+            w->cast(target);
+            return true;
         }
+        return false;
     }
-#pragma endregion
+    #pragma endregion
 
-#pragma region e_logic
-    void e_logic()
+
+    #pragma region e_logic
+    bool e_logic()
     {
-        // Get a target from a given range
         auto target = target_selector->get_target(e->range(), damage_type::magical);
 
-        // Always check an object is not a nullptr!
         if (target == nullptr)
-            return;
+            return false;;
 
         if (target->get_distance(myhero) <= e->range())
         {
-            if (e->cast(target))
-                return;
+            e->cast(target);
+            return true;
         }
+        return false;
     }
-#pragma endregion
+    #pragma endregion
 
-#pragma region r_logic
-    void r_logic()
+    #pragma region r_logic
+    bool r_logic()
     {
-        // Get a target from a given range
         auto target = target_selector->get_target(r->range(), damage_type::magical);
 
-        // Always check an object is not a nullptr!
         if (target == nullptr)
-            return;
+            return false;
         
-        // Checking if the target will die from r damage
         if (r->get_damage(target) > target->get_health())
         {
             if (target->get_distance(myhero) <= r->range())
             {
-                if (r->cast(target))
-                    return;
+                r->cast(target);
+                return true;
             }
         }
+        return false;
     }
-#pragma endregion
+    #pragma endregion
 
-#pragma region protobelt_logic
-    void rocketbelt_logic()
+    #pragma region protobelt_logic
+    bool rocketbelt_logic()
     {
-        
-        
         const auto rocketbelt_slot = myhero->has_item(ItemId::Hextech_Rocketbelt);
         if (rocketbelt_slot == spellslot::invalid)
-            return;
+            return false;
         if (!myhero->is_item_ready(ItemId::Hextech_Rocketbelt))
-            return;
+            return false;
         const auto spell = myhero->get_item(rocketbelt_slot);
     
         auto target = target_selector->get_target(combo::q_range->get_int(), damage_type::magical);
 
         if (target == nullptr)
-            return;
+            return false;
     
         myhero->cast_spell(rocketbelt_slot, target->get_position());
-
-
+        return true;
     }
-#pragma endregion
+    #pragma endregion
+
+
+    // perfect w logic
+    #pragma region w_timer_logic
+    bool w_timer_logic()
+    {
+        auto target = target_selector->get_target(w->range(), damage_type::magical);
+
+        if (target == nullptr)
+            return false;
+
+        if (target->get_distance(myhero) <= w->range())
+        {
+            w->cast(target);
+            startTimer();
+            return true;
+        }
+        return false;
+    }
+    #pragma endregion
+
+
+    #pragma region check_w_state
+    bool check_w_charged()
+    {
+        auto target = target_selector->get_target(w->range(), damage_type::magical);
+
+        if (target == nullptr)
+            return false;
+
+        float distance = myhero->get_distance(target->get_position());
+        float q_travel_time = distance / q->get_speed();
+        float time_passed = getTimerStatus();
+        float charged_time = q_travel_time + time_passed;
+        
+        if (charged_time >= 2.5f)
+        {
+            resetTimer();
+            return true;
+        }
+        return false;
+    }
+    #pragma endregion
+
+
+    #pragma region startTimer
+    void startTimer()
+    {
+        timer_enabled = true;
+        w_cast_tp = gametime->get_time();
+    }
+    #pragma endregion
+
+
+    #pragma region resetTimer
+    void resetTimer()
+    {
+        timer_enabled = false;
+        w_cast_tp = 0;
+    }
+    #pragma endregion
+
+
+    #pragma region getTimerStatus
+    float getTimerStatus()
+    {
+        float current_tp = gametime->get_time();
+        float time_passed = current_tp-w_cast_tp;
+        return time_passed;
+    }
+    #pragma endregion
+
+
+    // jungle logic
+    #pragma region isValidWMonster()
+    bool isValidWMonster(game_object_script monster)
+    {
+        if (monster->is_jungle_buff() || monster->is_epic_monster() || std::strcmp(monster->get_model_cstr(), "SRU_Gromp") == 0)
+            return true;
+        return false;
+    }
+    #pragma endregion
+
+
+    #pragma region validW()
+    bool validW(game_object_script monster)
+    {
+        if (monster == nullptr)
+            return false;
+
+        if (w->is_ready() && !q->is_ready() && !e->is_ready() && isValidWMonster(monster) && !myhero->has_buff(eve_q_hash))
+        {
+            return true;
+        }
+        console->print("else");
+        return false;
+    }
+    #pragma endregion
+
 
     void on_before_attack(game_object_script target, bool* process)
     {
-        //if (q->is_ready())
-        //{
-        //    // Using q before autoattack on enemies
-        //    if (target->is_ai_hero() && ((orbwalker->combo_mode() && combo::use_q->get_bool()) || (orbwalker->harass() && harass::use_q->get_bool())))
-        //    {
-        //        if (q->cast())
-        //        {
-        //            return;
-        //        }
-        //    }
-        //}
+        *process = !timer_enabled;
     }
+
 
     void on_draw()
     {
-
         if (myhero->is_dead())
         {
             return;
         }
 
-        // Draw Q range
         if (draw_settings::draw_range_q->get_bool())
             draw_manager->add_circle(myhero->get_position(), q->range(), Q_DRAW_COLOR);
 
-        // Draw W range
         if (w->is_ready() && draw_settings::draw_range_w->get_bool())
             draw_manager->add_circle(myhero->get_position(), w->range(), W_DRAW_COLOR);
 
-        // Draw E range
         if (e->is_ready() && draw_settings::draw_range_e->get_bool())
             draw_manager->add_circle(myhero->get_position(), e->range(), E_DRAW_COLOR);
 
-        // Draw R range
         if (r->is_ready() && draw_settings::draw_range_r->get_bool())
             draw_manager->add_circle(myhero->get_position(), r->range(), R_DRAW_COLOR);
+
+        auto pos = myhero->get_position();
+        renderer->world_to_screen(pos, pos);
+        if (combo::wait_for_charm->get_bool())
+        {
+            draw_manager->add_text_on_screen(pos + vector(-45, 30), GREEN, 15, "CHARGE W: [ON]");
+        }
+        else
+        {
+            draw_manager->add_text_on_screen(pos + vector(-45, 30), RED, 15, "CHARGE W: [OFF]");
+        }
     }
+
 
     void on_buff_gain(game_object_script sender, buff_instance_script buff)
     {
-        if (sender != myhero)
-            return;
-            
-        
-        if (strcmp(buff->get_name_cstr(), "EvelynnQ2") == 0)
-            q->set_range(500);
+        if (sender == myhero && buff->get_hash_name() == eve_q_hash)
+            q->set_range(590);
     }
+
 
     void on_buff_lose(game_object_script sender, buff_instance_script buff)
     {
-        if (sender != myhero)
-            return;
-
-
-        if (strcmp(buff->get_name_cstr(), "EvelynnQ2") == 0)
+        if (sender == myhero && buff->get_hash_name() == eve_q_hash)
             q->set_range(800);
     }
 }
-

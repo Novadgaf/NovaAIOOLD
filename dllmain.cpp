@@ -3,10 +3,8 @@
 // Declare plugin name & supported champions
 //
 PLUGIN_NAME("Nova");
-SUPPORTED_CHAMPIONS(champion_id::Garen, champion_id::Evelynn);
+SUPPORTED_CHAMPIONS(champion_id::Evelynn);
 
-
-#include "garen.h"
 #include "evelynn.h"
 
 // Entry point of plugin
@@ -21,9 +19,6 @@ PLUGIN_API bool on_sdk_load(plugin_sdk_core* plugin_sdk_good)
     //
     switch (myhero->get_champion())
     {
-    case champion_id::Garen:
-        garen::load();
-        break;
     case champion_id::Evelynn:
         evelynn::load();
         break;
@@ -45,10 +40,10 @@ PLUGIN_API void on_sdk_unload()
 {
     switch (myhero->get_champion())
     {
-    case champion_id::Garen:
+    case champion_id::Evelynn:
         // Unload garen script
         //
-        garen::unload();
+        evelynn::unload();
         break;
     default:
         break;
